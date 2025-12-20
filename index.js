@@ -9,38 +9,42 @@ require("dotenv").config();
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// Render / proxies (muy importante para https)
+app.set("trust proxy", 1);
+
 // =======================
 //  CORS (LOCAL + DOMINIO + VERCEL)
 // =======================
-// ✅ Permite: localhost, tu dominio y cualquier preview *.vercel.app
-const allowedOrigins = [
+const allowedOrigins = new Set([
   "http://localhost:3000",
   "https://novafortesas.com",
   "https://www.novafortesas.com",
-];
+]);
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Permite Postman / server-to-server (sin origin)
-      if (!origin) return callback(null, true);
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Permite Postman / curl / server-to-server
+    if (!origin) return callback(null, true);
 
-      // Permite tu lista + cualquier subdominio de Vercel
-      if (allowedOrigins.includes(origin) || origin.endsWith(".vercel.app")) {
-        return callback(null, true);
-      }
+    // Permite tu lista + cualquier subdominio preview de Vercel
+    if (allowedOrigins.has(origin) || origin.endsWith(".vercel.app")) {
+      return callback(null, true);
+    }
 
-      return callback(new Error(`Not allowed by CORS: ${origin}`));
-    },
-  })
-);
+    return callback(new Error(`Not allowed by CORS: ${origin}`));
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // ✅ habilita preflight
 
 app.use(express.json());
 
 // =======================
 //  CARPETAS DE ARCHIVOS
 // =======================
-
 const uploadFolder = path.join(__dirname, "uploads"); // cotizaciones
 const modelsFolder = path.join(__dirname, "models"); // visor 3D
 
@@ -50,7 +54,6 @@ if (!fs.existsSync(modelsFolder)) fs.mkdirSync(modelsFolder, { recursive: true }
 // =======================
 //  MULTER PARA COTIZACIONES (.obj / .stl)
 // =======================
-
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadFolder),
   filename: (req, file, cb) => {
@@ -75,7 +78,6 @@ const upload = multer({
 // =======================
 //  MULTER PARA MODELOS 3D DEL VISOR (.glb / .gltf)
 // =======================
-
 const storageModels = multer.diskStorage({
   destination: (req, file, cb) => cb(null, modelsFolder),
   filename: (req, file, cb) => {
@@ -100,7 +102,6 @@ const uploadModels = multer({
 // =======================
 //  Nodemailer (correo)
 // =======================
-
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST, // smtp.gmail.com
   port: Number(process.env.EMAIL_PORT) || 587,
@@ -109,6 +110,10 @@ const transporter = nodemailer.createTransport({
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+  // Ayuda en entornos cloud
+  connectionTimeout: 20000,
+  greetingTimeout: 20000,
+  socketTimeout: 20000,
 });
 
 // Verificar configuración al arrancar
@@ -123,59 +128,52 @@ transporter.verify((error) => {
 // =======================
 //  RUTA PARA PROBAR SERVIDOR
 // =======================
-
 app.get("/", (req, res) => {
   res.send("NOVAFORTE backend is running ✅");
 });
 
 // =======================
-//  SERVIR MODELOS ESTÁTICOS
+//  SERVIR MODELOS ESTÁTICOS (con headers adecuados)
 // =======================
-// Esto permite acceder a: https://tu-backend.onrender.com/models/archivo.glb
-app.use("/models", express.static(modelsFolder));
+app.use(
+  "/models",
+  express.static(modelsFolder, {
+    setHeaders: (res, filePath) => {
+      const ext = path.extname(filePath).toLowerCase();
+      if (ext === ".glb") res.setHeader("Content-Type", "model/gltf-binary");
+      if (ext === ".gltf") res.setHeader("Content-Type", "model/gltf+json");
+      // caching razonable
+      res.setHeader("Cache-Control", "public, max-age=3600");
+    },
+  })
+);
 
 // =======================
 //  RUTA DE COTIZACIÓN (form + archivos)
 // =======================
-
 app.post("/api/quote", upload.array("files", 5), async (req, res) => {
   try {
     const { name, email, phone, clientType, serviceType, description, urgency, privacyAccepted } = req.body;
     const files = req.files || [];
 
-    console.log("📝 Nueva solicitud de cotización:", {
-      name,
-      email,
-      phone,
-      clientType,
-      serviceType,
-      urgency,
-      privacyAccepted,
-    });
-
-    // =======================
-    //  DATOS DE LA EMPRESA (AJÚSTALOS)
-    // =======================
+    // Datos empresa
     const companyName = "NOVAFORTE Ingeniería Biomédica";
     const companyLocation = "Bogotá, Colombia";
     const companyPhone = "+57 000 000 0000";
     const companyEmail = "contacto@novafortesas.com";
     const companyWebsite = "https://www.novafortesas.com";
-    const logoUrl = ""; // URL pública si luego quieres mostrar logo en el correo
+    const logoUrl = "";
 
     const filesListHtml =
       files.length > 0
         ? `<ul style="margin: 8px 0 0; padding-left: 18px;">
-            ${files
-              .map((file) => `<li>${file.originalname} (${Math.round(file.size / 1024)} KB)</li>`)
-              .join("")}
+            ${files.map((f) => `<li>${f.originalname} (${Math.round(f.size / 1024)} KB)</li>`).join("")}
           </ul>`
         : '<p style="margin: 0;">No se adjuntaron archivos 3D.</p>';
 
     const htmlBody = `
       <div style="font-family: Arial, Helvetica, sans-serif; background-color: #f5f5f5; padding: 24px;">
         <div style="max-width: 640px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.06);">
-          
           <div style="background-color: #8c0507; color: #ffffff; padding: 16px 24px;">
             <div style="display: flex; align-items: center; gap: 12px;">
               ${
@@ -198,40 +196,19 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
             <h2 style="font-size: 16px; margin: 16px 0 8px; color: #303030;">Datos del cliente</h2>
             <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
               <tbody>
-                <tr>
-                  <td style="padding: 6px 0; width: 35%; color: #555;"><strong>Nombre</strong></td>
-                  <td style="padding: 6px 0; color: #111;">${name || "-"}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 6px 0; color: #555;"><strong>Email</strong></td>
-                  <td style="padding: 6px 0; color: #111;">${email || "-"}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 6px 0; color: #555;"><strong>Teléfono</strong></td>
-                  <td style="padding: 6px 0; color: #111;">${phone || "N/A"}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 6px 0; color: #555;"><strong>Tipo de cliente</strong></td>
-                  <td style="padding: 6px 0; color: #111;">${clientType || "N/A"}</td>
-                </tr>
+                <tr><td style="padding: 6px 0; width: 35%; color: #555;"><strong>Nombre</strong></td><td style="padding: 6px 0; color: #111;">${name || "-"}</td></tr>
+                <tr><td style="padding: 6px 0; color: #555;"><strong>Email</strong></td><td style="padding: 6px 0; color: #111;">${email || "-"}</td></tr>
+                <tr><td style="padding: 6px 0; color: #555;"><strong>Teléfono</strong></td><td style="padding: 6px 0; color: #111;">${phone || "N/A"}</td></tr>
+                <tr><td style="padding: 6px 0; color: #555;"><strong>Tipo de cliente</strong></td><td style="padding: 6px 0; color: #111;">${clientType || "N/A"}</td></tr>
               </tbody>
             </table>
 
             <h2 style="font-size: 16px; margin: 24px 0 8px; color: #303030;">Información del proyecto</h2>
             <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
               <tbody>
-                <tr>
-                  <td style="padding: 6px 0; width: 35%; color: #555;"><strong>Tipo de servicio</strong></td>
-                  <td style="padding: 6px 0; color: #111;">${serviceType || "N/A"}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 6px 0; color: #555;"><strong>Urgencia / fecha deseada</strong></td>
-                  <td style="padding: 6px 0; color: #111;">${urgency || "N/A"}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 6px 0; vertical-align: top; color: #555;"><strong>Descripción del caso</strong></td>
-                  <td style="padding: 6px 0; color: #111; white-space: pre-line;">${description || ""}</td>
-                </tr>
+                <tr><td style="padding: 6px 0; width: 35%; color: #555;"><strong>Tipo de servicio</strong></td><td style="padding: 6px 0; color: #111;">${serviceType || "N/A"}</td></tr>
+                <tr><td style="padding: 6px 0; color: #555;"><strong>Urgencia / fecha deseada</strong></td><td style="padding: 6px 0; color: #111;">${urgency || "N/A"}</td></tr>
+                <tr><td style="padding: 6px 0; vertical-align: top; color: #555;"><strong>Descripción del caso</strong></td><td style="padding: 6px 0; color: #111; white-space: pre-line;">${description || ""}</td></tr>
               </tbody>
             </table>
 
@@ -269,7 +246,6 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
       path: file.path,
     }));
 
-    console.log("📨 Enviando correo...");
     await transporter.sendMail({
       from: `"NOVAFORTE Website" <${process.env.EMAIL_USER}>`,
       to: process.env.EMAIL_TO || process.env.EMAIL_USER,
@@ -277,8 +253,6 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
       html: htmlBody,
       attachments,
     });
-
-    console.log("✅ Correo enviado correctamente");
 
     return res.json({ success: true, message: "Solicitud recibida y correo enviado" });
   } catch (err) {
@@ -290,18 +264,15 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
 // =======================
 //  SUBIR UN MODELO 3D PARA EL VISOR
 // =======================
-
 app.post("/api/models", uploadModels.single("model"), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded" });
 
+    const proto = req.secure ? "https" : "https"; // en Render siempre queremos https hacia afuera
     const host = req.get("host");
-    const proto = host && host.includes("onrender.com") ? "https" : req.protocol;
 
     const encoded = encodeURIComponent(req.file.filename);
     const fileUrl = `${proto}://${host}/models/${encoded}`;
-
-    console.log("🧩 Nuevo modelo 3D subido:", fileUrl);
 
     return res.json({
       success: true,
@@ -319,9 +290,8 @@ app.post("/api/models", uploadModels.single("model"), (req, res) => {
 });
 
 // =======================
-//  LISTAR MODELOS DISPONIBLES (✅ FIX https + espacios)
+//  LISTAR MODELOS DISPONIBLES (https + espacios)
 // =======================
-
 app.get("/api/models", (req, res) => {
   fs.readdir(modelsFolder, (err, files) => {
     if (err) {
@@ -329,18 +299,15 @@ app.get("/api/models", (req, res) => {
       return res.status(500).json({ success: false, message: "Error reading models folder" });
     }
 
+    const proto = "https";
     const host = req.get("host");
-    const proto = host && host.includes("onrender.com") ? "https" : req.protocol;
 
     const models = files
       .filter((file) => file.endsWith(".glb") || file.endsWith(".gltf"))
-      .map((file) => {
-        const encoded = encodeURIComponent(file);
-        return {
-          filename: file,
-          url: `${proto}://${host}/models/${encoded}`,
-        };
-      });
+      .map((file) => ({
+        filename: file,
+        url: `${proto}://${host}/models/${encodeURIComponent(file)}`,
+      }));
 
     return res.json({ success: true, models });
   });
@@ -349,7 +316,6 @@ app.get("/api/models", (req, res) => {
 // =======================
 //  Manejo de errores de Multer
 // =======================
-
 app.use((err, req, res, next) => {
   if (
     err instanceof multer.MulterError ||
