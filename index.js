@@ -21,6 +21,8 @@ const allowedOrigins = new Set([
   "https://www.novafortesas.com",
 ]);
 
+// ✅ CAMBIO APLICADO (métodos PUT/DELETE incluidos)
+// OJO: como allowedOrigins es Set, usamos .has() (NO .includes())
 const corsOptions = {
   origin: (origin, callback) => {
     // Permite Postman / curl / server-to-server
@@ -33,12 +35,12 @@ const corsOptions = {
 
     return callback(new Error(`Not allowed by CORS: ${origin}`));
   },
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // ✅ habilita preflight
+app.options(/.*/, cors(corsOptions));
 
 app.use(express.json());
 
@@ -142,7 +144,6 @@ app.use(
       const ext = path.extname(filePath).toLowerCase();
       if (ext === ".glb") res.setHeader("Content-Type", "model/gltf-binary");
       if (ext === ".gltf") res.setHeader("Content-Type", "model/gltf+json");
-      // caching razonable
       res.setHeader("Cache-Control", "public, max-age=3600");
     },
   })
@@ -153,7 +154,17 @@ app.use(
 // =======================
 app.post("/api/quote", upload.array("files", 5), async (req, res) => {
   try {
-    const { name, email, phone, clientType, serviceType, description, urgency, privacyAccepted } = req.body;
+    const {
+      name,
+      email,
+      phone,
+      clientType,
+      serviceType,
+      description,
+      urgency,
+      privacyAccepted,
+    } = req.body;
+
     const files = req.files || [];
 
     // Datos empresa
@@ -167,7 +178,12 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
     const filesListHtml =
       files.length > 0
         ? `<ul style="margin: 8px 0 0; padding-left: 18px;">
-            ${files.map((f) => `<li>${f.originalname} (${Math.round(f.size / 1024)} KB)</li>`).join("")}
+            ${files
+              .map(
+                (f) =>
+                  `<li>${f.originalname} (${Math.round(f.size / 1024)} KB)</li>`
+              )
+              .join("")}
           </ul>`
         : '<p style="margin: 0;">No se adjuntaron archivos 3D.</p>';
 
@@ -219,7 +235,9 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
             <p style="font-size: 13px; color: #555; margin: 0 0 4px;">
               Aceptación de política de privacidad:
               <strong style="color: ${
-                String(privacyAccepted) === "true" || privacyAccepted === "on" ? "#2e7d32" : "#c62828"
+                String(privacyAccepted) === "true" || privacyAccepted === "on"
+                  ? "#2e7d32"
+                  : "#c62828"
               };">
                 ${privacyAccepted}
               </strong>
@@ -268,7 +286,7 @@ app.post("/api/models", uploadModels.single("model"), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded" });
 
-    const proto = req.secure ? "https" : "https"; // en Render siempre queremos https hacia afuera
+    const proto = "https"; // en Render hacia afuera siempre https
     const host = req.get("host");
 
     const encoded = encodeURIComponent(req.file.filename);
