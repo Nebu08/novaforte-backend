@@ -38,7 +38,8 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
+// ✅ FIX Express v5: NO uses "*" ni regex /.*/ para options
+app.options("/*", cors(corsOptions));
 
 app.use(express.json());
 
@@ -86,8 +87,9 @@ const upload = multer({
 const storageModels = multer.diskStorage({
   destination: (req, file, cb) => cb(null, modelsFolder),
   filename: (req, file, cb) => {
-    const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, unique + path.extname(file.originalname));
+    // OJO: acá dejamos el nombre original (sin unique) si quieres.
+    // Si prefieres único, deja el unique.
+    cb(null, file.originalname);
   },
 });
 
@@ -109,6 +111,39 @@ const uploadModels = multer({
 // =======================
 app.get("/", (req, res) => {
   res.send("NOVAFORTE backend is running ✅");
+});
+
+// =======================
+//  TEST MAIL (RESEND) ✅
+// =======================
+app.get("/api/test-mail", async (req, res) => {
+  try {
+    const from = process.env.EMAIL_FROM || "NOVAFORTE <onboarding@resend.dev>";
+    const to = process.env.EMAIL_TO;
+
+    if (!process.env.RESEND_API_KEY) {
+      return res.status(500).json({ success: false, message: "Falta RESEND_API_KEY" });
+    }
+    if (!to) {
+      return res.status(500).json({ success: false, message: "Falta EMAIL_TO" });
+    }
+
+    const result = await resend.emails.send({
+      from,
+      to: [to],
+      subject: "✅ Prueba Resend NOVAFORTE",
+      html: "<strong>Correo enviado correctamente desde Render + Resend</strong>",
+    });
+
+    if (result?.error) {
+      return res.status(500).json({ success: false, error: result.error });
+    }
+
+    return res.json({ success: true, result });
+  } catch (err) {
+    console.error("❌ Error /api/test-mail:", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // =======================
@@ -144,6 +179,19 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
 
     const files = req.files || [];
 
+    // ✅ Validaciones de Resend
+    const from = process.env.EMAIL_FROM || "NOVAFORTE <onboarding@resend.dev>";
+    const to = process.env.EMAIL_TO;
+
+    if (!process.env.RESEND_API_KEY) {
+      console.error("❌ Falta RESEND_API_KEY");
+      return res.status(500).json({ success: false, message: "Falta RESEND_API_KEY" });
+    }
+    if (!to) {
+      console.error("❌ Falta EMAIL_TO");
+      return res.status(500).json({ success: false, message: "Falta EMAIL_TO" });
+    }
+
     // Datos empresa
     const companyName = "NOVAFORTE Ingeniería Biomédica";
     const companyLocation = "Bogotá, Colombia";
@@ -152,29 +200,21 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
     const companyWebsite = "https://www.novafortesas.com";
     const logoUrl = "";
 
-    // 🔹 Listado de archivos adjuntos en HTML (para el correo)
     const filesListHtml =
       files.length > 0
         ? `<ul style="margin: 8px 0 0; padding-left: 18px;">
             ${files
-              .map(
-                (f) => `<li>${f.originalname} (${Math.round(f.size / 1024)} KB)</li>`
-              )
+              .map((f) => `<li>${f.originalname} (${Math.round(f.size / 1024)} KB)</li>`)
               .join("")}
           </ul>`
         : '<p style="margin: 0;">No se adjuntaron archivos 3D.</p>';
 
-    // ✅ Correo bien formateado
     const htmlBody = `
       <div style="font-family: Arial, Helvetica, sans-serif; background-color: #f5f5f5; padding: 24px;">
         <div style="max-width: 640px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.06);">
           <div style="background-color: #8c0507; color: #ffffff; padding: 16px 24px;">
             <div style="display: flex; align-items: center; gap: 12px;">
-              ${
-                logoUrl
-                  ? `<img src="${logoUrl}" alt="Logo NOVAFORTE" style="height: 40px; border-radius: 4px; background: #fff; padding: 4px;" />`
-                  : ""
-              }
+              ${logoUrl ? `<img src="${logoUrl}" alt="Logo NOVAFORTE" style="height: 40px; border-radius: 4px; background: #fff; padding: 4px;" />` : ""}
               <div>
                 <h1 style="margin: 0; font-size: 20px;">Nueva solicitud de cotización</h1>
                 <p style="margin: 4px 0 0; font-size: 13px;">${companyName} · Impresión 3D para el sector salud</p>
@@ -213,9 +253,7 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
             <p style="font-size: 13px; color: #555; margin: 0 0 4px;">
               Aceptación de política de privacidad:
               <strong style="color: ${
-                String(privacyAccepted) === "true" || privacyAccepted === "on"
-                  ? "#2e7d32"
-                  : "#c62828"
+                String(privacyAccepted) === "true" || privacyAccepted === "on" ? "#2e7d32" : "#c62828"
               };">
                 ${privacyAccepted}
               </strong>
@@ -227,40 +265,24 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
               <p style="margin: 0 0 2px;">Tel: ${companyPhone}</p>
               <p style="margin: 0 0 2px;">Email: ${companyEmail}</p>
               <p style="margin: 0;">Web: <a href="${companyWebsite}" target="_blank" style="color: #8c0507; text-decoration: none;">${companyWebsite}</a></p>
-
-              <p style="margin-top: 12px; font-size: 11px; color: #999;">
-                Este correo fue generado automáticamente desde el formulario de cotización de NOVAFORTE.
-              </p>
             </div>
           </div>
         </div>
       </div>
     `;
 
-    // ✅ Enviar con Resend (sin SMTP)
-    const from = process.env.EMAIL_FROM || "NOVAFORTE <onboarding@resend.dev>";
-    const to = process.env.EMAIL_TO;
-
-    if (!process.env.RESEND_API_KEY) {
-      console.error("❌ Falta RESEND_API_KEY en variables de entorno.");
-      return res.status(500).json({ success: false, message: "Falta configuración de correo (RESEND_API_KEY)." });
-    }
-    if (!to) {
-      console.error("❌ Falta EMAIL_TO en variables de entorno.");
-      return res.status(500).json({ success: false, message: "Falta configuración de correo (EMAIL_TO)." });
-    }
-
+    // ✅ Enviar con Resend
     const result = await resend.emails.send({
       from,
       to: [to],
       subject: "Nueva solicitud de cotización - NOVAFORTE",
       html: htmlBody,
-      // Nota: adjuntos no incluidos aquí (plan gratis y archivos grandes).
-      // Tus archivos quedan guardados en /uploads y puedes gestionarlos luego.
+      // Nota: sin adjuntos (en free puede ser limitado y además Render puede borrar uploads).
+      // Si luego quieres adjuntos, lo hacemos con almacenamiento externo (S3/Cloudinary) y se envían links.
     });
 
-    if (result.error) {
-      console.error("❌ Error enviando correo con Resend:", result.error);
+    if (result?.error) {
+      console.error("❌ Resend error:", result.error);
       return res.status(500).json({ success: false, message: "No se pudo enviar el correo (Resend)." });
     }
 
@@ -280,9 +302,7 @@ app.post("/api/models", uploadModels.single("model"), (req, res) => {
 
     const proto = "https"; // en Render hacia afuera siempre https
     const host = req.get("host");
-
     const encoded = encodeURIComponent(req.file.filename);
-    const fileUrl = `${proto}://${host}/models/${encoded}`;
 
     return res.json({
       success: true,
@@ -290,7 +310,7 @@ app.post("/api/models", uploadModels.single("model"), (req, res) => {
       model: {
         name: req.file.originalname,
         filename: req.file.filename,
-        url: fileUrl,
+        url: `${proto}://${host}/models/${encoded}`,
       },
     });
   } catch (err) {
@@ -343,4 +363,5 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
 });
+
 
