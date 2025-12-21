@@ -3,7 +3,7 @@ const cors = require("cors");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 require("dotenv").config();
 
 const app = express();
@@ -21,8 +21,6 @@ const allowedOrigins = new Set([
   "https://www.novafortesas.com",
 ]);
 
-// ✅ CAMBIO APLICADO (métodos PUT/DELETE incluidos)
-// OJO: como allowedOrigins es Set, usamos .has() (NO .includes())
 const corsOptions = {
   origin: (origin, callback) => {
     // Permite Postman / curl / server-to-server
@@ -43,6 +41,11 @@ app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
 app.use(express.json());
+
+// =======================
+//  EMAIL (RESEND) ✅
+// =======================
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // =======================
 //  CARPETAS DE ARCHIVOS
@@ -102,32 +105,6 @@ const uploadModels = multer({
 });
 
 // =======================
-//  Nodemailer (correo)
-// =======================
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST, // smtp.gmail.com
-  port: Number(process.env.EMAIL_PORT) || 587,
-  secure: false,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-  // Ayuda en entornos cloud
-  connectionTimeout: 20000,
-  greetingTimeout: 20000,
-  socketTimeout: 20000,
-});
-
-// Verificar configuración al arrancar
-transporter.verify((error) => {
-  if (error) {
-    console.error("❌ Error verificando el transporte de correo:", error);
-  } else {
-    console.log("✅ Mail transporter listo para enviar correos");
-  }
-});
-
-// =======================
 //  RUTA PARA PROBAR SERVIDOR
 // =======================
 app.get("/", (req, res) => {
@@ -175,18 +152,19 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
     const companyWebsite = "https://www.novafortesas.com";
     const logoUrl = "";
 
+    // 🔹 Listado de archivos adjuntos en HTML (para el correo)
     const filesListHtml =
       files.length > 0
         ? `<ul style="margin: 8px 0 0; padding-left: 18px;">
             ${files
               .map(
-                (f) =>
-                  `<li>${f.originalname} (${Math.round(f.size / 1024)} KB)</li>`
+                (f) => `<li>${f.originalname} (${Math.round(f.size / 1024)} KB)</li>`
               )
               .join("")}
           </ul>`
         : '<p style="margin: 0;">No se adjuntaron archivos 3D.</p>';
 
+    // ✅ Correo bien formateado
     const htmlBody = `
       <div style="font-family: Arial, Helvetica, sans-serif; background-color: #f5f5f5; padding: 24px;">
         <div style="max-width: 640px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.06);">
@@ -259,18 +237,32 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
       </div>
     `;
 
-    const attachments = files.map((file) => ({
-      filename: file.originalname,
-      path: file.path,
-    }));
+    // ✅ Enviar con Resend (sin SMTP)
+    const from = process.env.EMAIL_FROM || "NOVAFORTE <onboarding@resend.dev>";
+    const to = process.env.EMAIL_TO;
 
-    await transporter.sendMail({
-      from: `"NOVAFORTE Website" <${process.env.EMAIL_USER}>`,
-      to: process.env.EMAIL_TO || process.env.EMAIL_USER,
+    if (!process.env.RESEND_API_KEY) {
+      console.error("❌ Falta RESEND_API_KEY en variables de entorno.");
+      return res.status(500).json({ success: false, message: "Falta configuración de correo (RESEND_API_KEY)." });
+    }
+    if (!to) {
+      console.error("❌ Falta EMAIL_TO en variables de entorno.");
+      return res.status(500).json({ success: false, message: "Falta configuración de correo (EMAIL_TO)." });
+    }
+
+    const result = await resend.emails.send({
+      from,
+      to: [to],
       subject: "Nueva solicitud de cotización - NOVAFORTE",
       html: htmlBody,
-      attachments,
+      // Nota: adjuntos no incluidos aquí (plan gratis y archivos grandes).
+      // Tus archivos quedan guardados en /uploads y puedes gestionarlos luego.
     });
+
+    if (result.error) {
+      console.error("❌ Error enviando correo con Resend:", result.error);
+      return res.status(500).json({ success: false, message: "No se pudo enviar el correo (Resend)." });
+    }
 
     return res.json({ success: true, message: "Solicitud recibida y correo enviado" });
   } catch (err) {
@@ -351,3 +343,4 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
 });
+
