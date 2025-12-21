@@ -12,6 +12,9 @@ const PORT = process.env.PORT || 4000;
 // Render / proxies (muy importante para https)
 app.set("trust proxy", 1);
 
+// ✅ Importante: parsear JSON antes de rutas
+app.use(express.json());
+
 // =======================
 //  CORS (LOCAL + DOMINIO + VERCEL)
 // =======================
@@ -38,15 +41,19 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// ✅ FIX Express v5: NO uses "*" ni regex /.*/ para options
-app.options("/*", cors(corsOptions));
 
-app.use(express.json());
+// ✅ FIX Express 5: NO usar "*" ni "/*" en app.options
+// Respondemos preflight OPTIONS para cualquier ruta con 204
+app.use((req, res, next) => {
+  if (req.method !== "OPTIONS") return next();
+  cors(corsOptions)(req, res, () => res.sendStatus(204));
+});
 
 // =======================
-//  EMAIL (RESEND) ✅
+//  EMAIL (RESEND)
 // =======================
-const resend = new Resend(process.env.RESEND_API_KEY);
+// ✅ Evita que el deploy se caiga si falta la key
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 // =======================
 //  CARPETAS DE ARCHIVOS
@@ -87,8 +94,7 @@ const upload = multer({
 const storageModels = multer.diskStorage({
   destination: (req, file, cb) => cb(null, modelsFolder),
   filename: (req, file, cb) => {
-    // OJO: acá dejamos el nombre original (sin unique) si quieres.
-    // Si prefieres único, deja el unique.
+    // Guarda el nombre original (ojo: puede sobrescribir si subes uno con el mismo nombre)
     cb(null, file.originalname);
   },
 });
@@ -121,7 +127,7 @@ app.get("/api/test-mail", async (req, res) => {
     const from = process.env.EMAIL_FROM || "NOVAFORTE <onboarding@resend.dev>";
     const to = process.env.EMAIL_TO;
 
-    if (!process.env.RESEND_API_KEY) {
+    if (!process.env.RESEND_API_KEY || !resend) {
       return res.status(500).json({ success: false, message: "Falta RESEND_API_KEY" });
     }
     if (!to) {
@@ -179,11 +185,10 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
 
     const files = req.files || [];
 
-    // ✅ Validaciones de Resend
     const from = process.env.EMAIL_FROM || "NOVAFORTE <onboarding@resend.dev>";
     const to = process.env.EMAIL_TO;
 
-    if (!process.env.RESEND_API_KEY) {
+    if (!process.env.RESEND_API_KEY || !resend) {
       console.error("❌ Falta RESEND_API_KEY");
       return res.status(500).json({ success: false, message: "Falta RESEND_API_KEY" });
     }
@@ -203,9 +208,7 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
     const filesListHtml =
       files.length > 0
         ? `<ul style="margin: 8px 0 0; padding-left: 18px;">
-            ${files
-              .map((f) => `<li>${f.originalname} (${Math.round(f.size / 1024)} KB)</li>`)
-              .join("")}
+            ${files.map((f) => `<li>${f.originalname} (${Math.round(f.size / 1024)} KB)</li>`).join("")}
           </ul>`
         : '<p style="margin: 0;">No se adjuntaron archivos 3D.</p>';
 
@@ -252,9 +255,7 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
             <h2 style="font-size: 16px; margin: 24px 0 8px; color: #303030;">Privacidad</h2>
             <p style="font-size: 13px; color: #555; margin: 0 0 4px;">
               Aceptación de política de privacidad:
-              <strong style="color: ${
-                String(privacyAccepted) === "true" || privacyAccepted === "on" ? "#2e7d32" : "#c62828"
-              };">
+              <strong style="color: ${String(privacyAccepted) === "true" || privacyAccepted === "on" ? "#2e7d32" : "#c62828"};">
                 ${privacyAccepted}
               </strong>
             </p>
@@ -271,14 +272,11 @@ app.post("/api/quote", upload.array("files", 5), async (req, res) => {
       </div>
     `;
 
-    // ✅ Enviar con Resend
     const result = await resend.emails.send({
       from,
       to: [to],
       subject: "Nueva solicitud de cotización - NOVAFORTE",
       html: htmlBody,
-      // Nota: sin adjuntos (en free puede ser limitado y además Render puede borrar uploads).
-      // Si luego quieres adjuntos, lo hacemos con almacenamiento externo (S3/Cloudinary) y se envían links.
     });
 
     if (result?.error) {
@@ -300,7 +298,7 @@ app.post("/api/models", uploadModels.single("model"), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded" });
 
-    const proto = "https"; // en Render hacia afuera siempre https
+    const proto = "https";
     const host = req.get("host");
     const encoded = encodeURIComponent(req.file.filename);
 
@@ -320,7 +318,7 @@ app.post("/api/models", uploadModels.single("model"), (req, res) => {
 });
 
 // =======================
-//  LISTAR MODELOS DISPONIBLES (https + espacios)
+//  LISTAR MODELOS DISPONIBLES
 // =======================
 app.get("/api/models", (req, res) => {
   fs.readdir(modelsFolder, (err, files) => {
@@ -363,5 +361,6 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
 });
+
 
 
