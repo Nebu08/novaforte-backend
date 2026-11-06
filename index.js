@@ -4,7 +4,8 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
+const crypto = require("crypto");
 const validator = require("validator");
 const { Resend } = require("resend");
 require("dotenv").config();
@@ -15,6 +16,11 @@ const IS_PROD = process.env.NODE_ENV === "production";
 
 // Render / proxies (muy importante para https y rate limiting correcto)
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
+
+// IP real del visitante para los límites de envío. Render atiende detrás de Cloudflare, que fija
+// CF-Connecting-IP; sin ese encabezado se usa req.ip.
+const clientKey = (req) => ipKeyGenerator(String(req.headers["cf-connecting-ip"] || req.ip || ""));
 
 // ============================================================
 //  SEGURIDAD: HELMET — cabeceras HTTP de seguridad
@@ -96,6 +102,7 @@ const contactLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: "Demasiadas solicitudes. Intenta de nuevo en 15 minutos." },
+  keyGenerator: clientKey,
   skip: (req) => !IS_PROD,     // Solo en producción
 });
 
@@ -105,12 +112,19 @@ const modelsUploadLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: "Límite de uploads alcanzado. Intenta más tarde." },
+  keyGenerator: clientKey,
   skip: (req) => !IS_PROD,
 });
 
 // ============================================================
 //  HELPER: Sanitizar string para uso en HTML
 // ============================================================
+// Autorización de tratamiento de datos (Ley 1581 de 2012). Los formularios piden datos de salud,
+// que son sensibles: sin autorización expresa no se procesa la solicitud.
+function privacyAccepted(value) {
+  return value === true || String(value) === "true" || value === "on";
+}
+
 function sanitize(value) {
   if (value === undefined || value === null) return "";
   const str = String(value).trim();
@@ -161,7 +175,9 @@ const upload = multer({
 const storageModels = multer.diskStorage({
   destination: (req, file, cb) => cb(null, modelsFolder),
   filename: (req, file, cb) => {
-    cb(null, file.originalname);
+    // Solo el nombre base, sin rutas ni caracteres raros (evita ../ y sobrescribir archivos fuera de la carpeta)
+    const base = path.basename(file.originalname).replace(/[^\w. -]/g, "_").slice(0, 120);
+    cb(null, base || `modelo-${Date.now()}.glb`);
   },
 });
 
@@ -193,7 +209,9 @@ function requireModelsApiKey(req, res, next) {
     return next(); // En dev, permitir sin key
   }
 
-  if (!apiKey || apiKey !== expected) {
+  const recibida = Buffer.from(String(apiKey || ""));
+  const esperada = Buffer.from(expected);
+  if (recibida.length !== esperada.length || !crypto.timingSafeEqual(recibida, esperada)) {
     return res.status(403).json({ success: false, message: "Acceso no autorizado." });
   }
   next();
@@ -269,15 +287,20 @@ app.post("/api/quote", contactLimiter, upload.array("files", 5), async (req, res
       serviceType,
       description,
       urgency,
-      privacyAccepted,
     } = req.body;
 
     // Validar email básico
+    const files = req.files || [];
+
+    // Sin autorización de datos no se procesa la solicitud, y los archivos ya recibidos se borran.
+    if (!privacyAccepted(req.body.privacyAccepted)) {
+      for (const f of files) fs.unlink(f.path, () => {});
+      return res.status(400).json({ success: false, message: "Debes autorizar el tratamiento de datos para enviar la solicitud." });
+    }
+
     if (email && !validator.isEmail(String(email))) {
       return res.status(400).json({ success: false, message: "Email inválido." });
     }
-
-    const files = req.files || [];
 
     const from = process.env.EMAIL_FROM || "NOVAFORTE <onboarding@resend.dev>";
     const to = process.env.EMAIL_TO;
@@ -299,7 +322,7 @@ app.post("/api/quote", contactLimiter, upload.array("files", 5), async (req, res
     const sServiceType = sanitize(serviceType);
     const sDescription = sanitize(description);
     const sUrgency     = sanitize(urgency);
-    const privacyOk    = String(privacyAccepted) === "true" || privacyAccepted === "on";
+    const privacyOk    = true;   // ya validada al inicio
 
     const companyName    = "NOVAFORTE Ingeniería Biomédica";
     const companyLocation = "Bogotá, Colombia";
@@ -385,7 +408,11 @@ app.post("/api/quote", contactLimiter, upload.array("files", 5), async (req, res
 // ============================================================
 app.post("/api/contact", contactLimiter, async (req, res) => {
   try {
-    const data = req.body;
+    const { privacyAccepted: autorizo, privacyVersion, ...data } = req.body || {};
+
+    if (!privacyAccepted(autorizo)) {
+      return res.status(400).json({ success: false, message: "Debes autorizar el tratamiento de datos para enviar la solicitud." });
+    }
 
     // Validar email si existe
     if (data.email && !validator.isEmail(String(data.email))) {
@@ -442,9 +469,14 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
 
     // Sanitizar todos los valores del formulario
     let rowsHtml = "";
-    for (const [key, value] of Object.entries(data)) {
-      const label = keysMap[key] || sanitize(key);
-      const safeVal = sanitize(value);
+    // Prueba de la autorización (Ley 1581): fecha, versión del texto aceptado e IP
+    const evidencia = `Sí · ${new Date().toLocaleString("es-CO", { timeZone: "America/Bogota" })} · versión ${String(privacyVersion || "sin versión").slice(0, 20)} · IP ${req.headers["cf-connecting-ip"] || req.ip}`;
+    const filas = { ...data, autorizacion: evidencia };
+
+    for (const [key, value] of Object.entries(filas)) {
+      const label = key === "autorizacion" ? "Autorización de datos" : keysMap[key];
+      if (!label || typeof value === "object") continue;   // ignora campos desconocidos
+      const safeVal = sanitize(String(value ?? "").slice(0, 5000));
       if (safeVal) {
         rowsHtml += `
           <tr>
