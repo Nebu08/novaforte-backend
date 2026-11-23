@@ -8,6 +8,7 @@ const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const crypto = require("crypto");
 const validator = require("validator");
 const { Resend } = require("resend");
+const { enviarLeadAlErp, leadDesdeContacto, leadDesdeCotizacion } = require("./erp");
 require("dotenv").config();
 
 const app = express();
@@ -302,6 +303,9 @@ app.post("/api/quote", contactLimiter, upload.array("files", 5), async (req, res
       return res.status(400).json({ success: false, message: "Email inválido." });
     }
 
+    // Copia al ERP en segundo plano (no afecta la respuesta ni el correo).
+    enviarLeadAlErp(leadDesdeCotizacion(req.body), files);
+
     const from = process.env.EMAIL_FROM || "NOVAFORTE <onboarding@resend.dev>";
     const to = process.env.EMAIL_TO;
 
@@ -440,6 +444,9 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
       subject = "Descarga de Portafolio - Lead";
       typeLabel = "Descarga de Portafolio";
     }
+
+    // Copia al ERP en segundo plano (no afecta la respuesta ni el correo).
+    enviarLeadAlErp(leadDesdeContacto(data, typeLabel));
 
     const from = process.env.EMAIL_FROM || "NOVAFORTE <onboarding@resend.dev>";
     const to = process.env.EMAIL_TO;
